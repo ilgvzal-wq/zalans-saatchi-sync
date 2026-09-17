@@ -5,7 +5,8 @@
     "type": "module",
     "description": "Scrapes Ilgvars Zalans' public Saatchi Art artwork listing and publishes a JSON feed for zalans.com",
     "scripts": {
-          "scrape": "node scripts/scrape.mjs"
+          "scrape": "node scripts/scrape.mjs",
+        "sync": "node local-sync.mjs"
     },
     "dependencies": {
           "cheerio": "^1.0.0"
