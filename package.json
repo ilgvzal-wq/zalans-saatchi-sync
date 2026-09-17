@@ -1,0 +1,13 @@
+{
+    "name": "zalans-saatchi-sync",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "description": "Scrapes Ilgvars Zalans' public Saatchi Art artwork listing and publishes a JSON feed for zalans.com",
+    "scripts": {
+          "scrape": "node scripts/scrape.mjs"
+    },
+    "dependencies": {
+          "cheerio": "^1.0.0"
+    }
+}
