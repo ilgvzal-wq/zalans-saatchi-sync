@@ -1,5 +1,9 @@
 @echo off
 cd /d "%~dp0"
+if not exist node_modules (
+  echo Pirmo reizi sagatavoju nepieciesamo bibliotku, uzgaidi minuti...
+  call npm install
+)
 echo Running Zalans / Saatchi Art sync...
 node local-sync.mjs
 echo.
