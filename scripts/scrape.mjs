@@ -1,148 +1,105 @@
-// scripts/scrape.mjs
-// Scrapes the public Saatchi Art "all artworks" listing for artist Ilgvars
-// Zalans (profile id 6161) and writes a JSON feed consumed by zalans.com.
-//
-// Saatchi Art renders prices in the visitor's local currency based on
-// geolocation. GitHub Actions runners are US-hosted, so this should see
-// USD prices directly. A fallback conversion is applied if another
-// currency is detected, and the raw currency/amount are kept for reference.
+// Incrementally merge Saatchi's newest works into the public zalans.com feed.
+// The listing is a client-rendered page: read its embedded JSON, not <figure> tags.
+import { readFile, writeFile, mkdir, rename, access } from 'node:fs/promises';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-import * as cheerio from "cheerio";
-import { writeFile, mkdir } from "node:fs/promises";
-import path from "node:path";
+const BASE = 'https://ilgvzal-wq.github.io/zalans-saatchi-sync';
+const SOURCE = 'https://www.saatchiart.com/account/artworks/6161';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
+const inches = cm => Math.round(cm / 2.54 * 10) / 10;
 
-const ARTIST_ID = "6161";
-const SOURCE_URL = `https://www.saatchiart.com/account/artworks/${ARTIST_ID}?perPage=100`;
-const OUTPUT_PATH = path.join("docs", "saatchi.json");
-const FALLBACK_RATES = { EUR: 1.09, GBP: 1.27, USD: 1 };
-
-async function fetchHtml(url) {
-    const res = await fetch(url, {
-          headers: {
-                  "User-Agent":
-                    "Mozilla/5.0 (compatible; ZalansSaatchiSync/1.0; +https://github.com/ilgvzal-wq/zalans-saatchi-sync)",
-                  "Accept-Language": "en-US,en;q=0.9",
-          },
-    });
-    if (!res.ok) {
-          throw new Error(`Failed to fetch ${url}: ${res.status} ${res.statusText}`);
-    }
-    return res.text();
+export function pageData(html) {
+  const script = html.match(/<script\b(?=[^>]*\bid=["']__NEXT_DATA__["'])[^>]*>([\s\S]*?)<\/script>/i);
+  if (!script) throw new Error('Saatchi embedded JSON missing; existing feed retained.');
+  const data = JSON.parse(script[1])?.props?.pageProps?.initialState?.page?.data;
+  if (!data) throw new Error('Saatchi data schema changed; existing feed retained.');
+  return data;
 }
 
-function parsePrice(text) {
-    const match = text.match(/([\u20ac$\u00a3])\s?([\d.,]+)/);
-    if (!match) return null;
-    const symbolMap = { "$": "USD", "\u20ac": "EUR", "\u00a3": "GBP" };
-    const currency = symbolMap[match[1]] || "USD";
-    const amount = parseFloat(match[2].replace(/,/g, ""));
-    const rate = FALLBACK_RATES[currency] ?? 1;
-    return { amount, currency, priceUsd: Math.round(amount * rate) };
-}
-
-function extractIdFromUrl(url) {
-    const match = url.match(/\/(\d+)\/view/);
-    return match ? match[1] : null;
-}
-
-
-function parseCard($, el) {
-    const $el = $(el);
-    const link = $el.find('a[href*="/art/"]').first();
-    const href = link.attr("href");
-    if (!href) return null;
-
-  const id = extractIdFromUrl(href);
-    if (!id) return null;
-
-  const texts = $el
-      .find("p, span, a")
-      .map((i, node) => $(node).text().trim())
-      .get()
-      .filter(Boolean);
-
-  const priceText = texts.find((t) => /[\u20ac$\u00a3]\s?[\d.,]+/.test(t));
-    const titleText = texts.find((t) => /^".+"/.test(t));
-    const sizeText = texts.find((t) => /\d+(\.\d+)?\s*x\s*\d+(\.\d+)?\s*cm/i.test(t));
-    const mediumText = texts.find(
-          (t) =>
-                  t !== priceText &&
-                  t !== titleText &&
-                  t !== sizeText &&
-                  !/^Prints From/i.test(t) &&
-                  !/^Ready to hang/i.test(t) &&
-                  t.length > 0
-        );
-
-  if (!priceText || !titleText || !sizeText) return null;
-
-  const price = parsePrice(priceText);
-    const titleMatch = titleText.match(/^"(.+)"\s*(.*)$/);
-    const title = titleMatch ? titleMatch[1] : titleText;
-    const category = titleMatch ? titleMatch[2].trim() : null;
-
-  const sizeMatch = sizeText.match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*cm/i);
-    const widthCm = sizeMatch ? parseFloat(sizeMatch[1]) : null;
-    const heightCm = sizeMatch ? parseFloat(sizeMatch[2]) : null;
-
-  const img = $el.find("img").first();
-    const imageSrc = img.attr("src") || img.attr("data-src") || null;
-
-  return {
-        id,
-        title,
-        category,
-        priceUsd: price ? price.priceUsd : null,
-        priceRaw: price ? price.amount : null,
-        priceCurrency: price ? price.currency : null,
-        widthCm,
-        heightCm,
-        widthIn: widthCm ? Math.round((widthCm / 2.54) * 10) / 10 : null,
-        heightIn: heightCm ? Math.round((heightCm / 2.54) * 10) / 10 : null,
-        medium: mediumText || null,
-        available: true,
-        url: href,
-        sourceImage: imageSrc,
-  };
-}
-
-async function main() {
-    const html = await fetchHtml(SOURCE_URL);
-    const $ = cheerio.load(html);
-
-  const seen = new Set();
-    const works = [];
-
-  $("figure").each((i, el) => {
-        const $el = $(el);
-        if (!$el.find('a[href*="/art/"]').length) return;
-        if (!$el.find("img").length) return;
-        const parsed = parseCard($, el);
-        if (parsed && !seen.has(parsed.id)) {
-                seen.add(parsed.id);
-                works.push(parsed);
-        }
-  });
-
-  if (works.length === 0) {
-        throw new Error(
-                "No artworks parsed - Saatchi Art page structure may have changed, or the page could not be read without a login session."
-              );
+export function parseListing(html) {
+  const account = pageData(html).accountData;
+  if (String(account?.userId) !== '6161' || !account?.artworks?.length) {
+    throw new Error('Artist listing missing or empty; existing feed retained.');
   }
-
-  const output = {
-        updated: new Date().toISOString(),
-        source: `saatchiart.com/account/artworks/${ARTIST_ID}`,
-        total: works.length,
-        works,
-  };
-
-  await mkdir(path.dirname(OUTPUT_PATH), { recursive: true });
-    await writeFile(OUTPUT_PATH, JSON.stringify(output, null, 2));
-    console.log(`Wrote ${works.length} works to ${OUTPUT_PATH}`);
+  // Saatchi currently returns the newest 15 works, ignoring perPage=100.
+  // Preserve older entries: absence from this window never means sold/deleted.
+  return account.artworks.map(a => {
+    if (!/^\d+$/.test(String(a.artworkID)) || !a.title || !a.pdpUrl?.startsWith('/art/')) {
+      throw new Error('Invalid artwork listing; existing feed retained.');
+    }
+    return { id: String(a.artworkID), url: new URL(a.pdpUrl, SOURCE).href };
+  });
 }
 
-main().catch((err) => {
-    console.error(err);
-    process.exit(1);
-});
+export function parseArtwork(html, id) {
+  const data = pageData(html);
+  const a = data.artwork;
+  const pdp = data.pdpArtwork;
+  if (String(a?.artworkId) !== id || String(a?.userId) !== '6161') {
+    throw new Error(`Artwork identity mismatch for ${id}`);
+  }
+  // Use Saatchi's explicit US price; no guessed currency conversion.
+  const cents = pdp?.geoPricesInCents?.US ?? a.products?.find(p => p.original)?.original?.listPrices?.US;
+  const status = pdp?.originalArtworkStatus;
+  if (!['avail', 'sold', 'not_for_sale'].includes(status)) throw new Error(`Unknown status for ${id}: ${status}`);
+  const image = a.artworkImage?.imageUrl;
+  if (!a.title || !(a.width > 0) || !(a.height > 0) || !image || !(a.yearProduced > 1900) || (status === 'avail' && !(cents > 0))) {
+    throw new Error(`Incomplete artwork data for ${id}`);
+  }
+  return {
+    id, title: a.title, priceUsd: cents > 0 ? Math.round(cents / 100) : null,
+    widthCm: a.width, heightCm: a.height, widthIn: inches(a.width), heightIn: inches(a.height),
+    medium: (a.mediums || []).join(' & '), material: (a.materials || []).join(' & '),
+    available: status === 'avail', url: pdp.artworkOriginalUrl,
+    image, year: a.yearProduced
+  };
+}
+
+async function request(url, fetcher) {
+  const r = await fetcher(url, { headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' }, signal: AbortSignal.timeout(30000) });
+  if (!r.ok) throw new Error(`Saatchi request failed (${r.status}): ${url}; existing feed retained.`);
+  return r;
+}
+
+export async function sync({ directory = 'docs', fetcher = fetch } = {}) {
+  const output = path.join(directory, 'saatchi.json');
+  // Missing/corrupt current data must never silently replace the catalogue.
+  const current = JSON.parse(await readFile(output, 'utf8'));
+  if (!Array.isArray(current.works) || !current.works.length) throw new Error('Existing feed invalid.');
+  const listing = parseListing(await (await request(SOURCE, fetcher)).text());
+  const known = new Map(current.works.map(w => [String(w.id), w]));
+  const fresh = [];
+  const images = [];
+  for (const item of listing) {
+    // Keep existing curated entries intact; import all newly discovered works.
+    if (known.has(item.id)) continue;
+    const work = parseArtwork(await (await request(item.url, fetcher)).text(), item.id);
+    const imagePath = path.join(directory, 'images', `${item.id}.jpg`);
+    try { await access(imagePath); }
+    catch {
+      const r = await request(work.image, fetcher);
+      const bytes = Buffer.from(await r.arrayBuffer());
+      if (!r.headers.get('content-type')?.startsWith('image/') || bytes[0] !== 0xff || bytes[1] !== 0xd8) {
+        throw new Error(`Invalid JPEG for ${item.id}; existing feed retained.`);
+      }
+      images.push({ imagePath, bytes });
+    }
+    work.image = `${BASE}/images/${item.id}.jpg`;
+    fresh.push(work);
+  }
+  if (!fresh.length) { console.log('No new artworks; feed unchanged.'); return current; }
+  // Fetch/validate everything before writing. A block or schema error keeps the feed.
+  await mkdir(path.join(directory, 'images'), { recursive: true });
+  for (const { imagePath, bytes } of images) await writeFile(imagePath, bytes);
+  const works = [...fresh, ...current.works];
+  const next = { ...current, updated: new Date().toISOString(), source: 'saatchiart.com/zalans', total: works.length, works };
+  await writeFile(output + '.tmp', JSON.stringify(next, null, 2) + '\n');
+  await rename(output + '.tmp', output);
+  console.log(`Added ${fresh.map(w => w.title).join(', ')}; retained ${current.works.length} existing artworks.`);
+  return next;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  sync().catch(error => { console.error(error.message); process.exitCode = 1; });
+}
