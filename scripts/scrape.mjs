@@ -5,7 +5,8 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const BASE = 'https://ilgvzal-wq.github.io/zalans-saatchi-sync';
-const SOURCE = 'https://www.saatchiart.com/account/artworks/6161';
+// Use the public artist profile rather than the account-management route.
+const SOURCE = 'https://www.saatchiart.com/zalans';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 const inches = cm => Math.round(cm / 2.54 * 10) / 10;
 
